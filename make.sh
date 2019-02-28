@@ -2,48 +2,48 @@
 
 set -e
 
+echo "$(date +%Y-%m-%dT%H:%M:%S) Start" > log.txt
+
 log(){
-    echo "$(date +%Y-%m-%dT%H:%M:%S) $*"
+    echo "$(date +%Y-%m-%dT%H:%M:%S) $*" >> log.txt
 }
 
-download_lego(){
-    log Download lego
-    local uname=$(uname -s -m)
-    local version=0.4.1
-    local base_url=https://github.com/xenolf/lego/releases/download
-    case "$uname" in
-      "Linux x86_64")
-          if [ ! -f lego ] ; then
-              curl -Lo lego.tar.xz ${base_url}/v${version}/lego_linux_amd64.tar.xz
-	      tar xf lego.tar.xz lego_linux_amd64
-	      mv lego_linux_amd64 lego
-	      chmod 755 lego
-	  fi
-	  rm -f lego.tar.xz
-	  ;;
-      Darwin*)
-          if [ ! -f lego ] ; then
-              curl -Lo lego.zip ${base_url}/v${version}/lego_darwin_amd64.zip
-	      unzip lego_darwin_amd64.zip lego_darwin_amd64
-	      mv lego_darwin_amd64 lego
-	      chmod 755 lego
-	  fi
-	  rm -f lego.zip
-	  ;;
-      MINGW64*)
-          if [ ! -f lego.exe ] ; then
-              curl -Lo lego.zip ${base_url}/v${version}/lego_windows_amd64.zip
-	      unzip lego.zip lego_windows_amd64.exe
-	      mv lego_windows_amd64.exe lego.exe
-	  fi
-	  rm -f lego.zip
-	  ;;
-      *)
-          echo "Unsupported platform $uname" 1>&2
-	  exit 1
-    esac
+wait_server_boot(){
+    addr=$(terraform output -json | jq -r .node2_address.value)
+    echo -n "Waiting for docker installed."
+    i=0
+    until timeout 5 ssh -i id_rsa -o StrictHostKeyChecking=no root@$addr docker ps > /dev/null 2>&1; do
+        echo -n "."
+        i=$(($i + 1))
+	if [ $i -ge 60 ] ; then
+	     echo "Given up the connecting to the server" 1>&2 >> log.txt
+	     exit 1
+	fi
+    done
+    echo
 }
 
+gen_rke_config() {
+    log Generate rke.yml
+
+    addr0=$(terraform output -json | jq -r .node0_address.value)
+    addr1=$(terraform output -json | jq -r .node1_address.value)
+    addr2=$(terraform output -json | jq -r .node2_address.value)
+
+    addr0_private=$(terraform output -json | jq -r .node0_address_private.value)
+    addr1_private=$(terraform output -json | jq -r .node1_address_private.value)
+    addr2_private=$(terraform output -json | jq -r .node2_address_private.value)
+
+    sed -e "1,/<IP>/s/<IP>/$addr0/" \
+        -e "1,/<IP>/s/<IP>/$addr1/" \
+        -e "1,/<IP>/s/<IP>/$addr2/" \
+        -e "1,/<IP_PRIVATE>/s/<IP_PRIVATE>/$addr0_private/" \
+        -e "1,/<IP_PRIVATE>/s/<IP_PRIVATE>/$addr1_private/" \
+        -e "1,/<IP_PRIVATE>/s/<IP_PRIVATE>/$addr2_private/" \
+        -e "s/<USER>/root/" \
+        -e "s/<PEM_FILE>/id_rsa/" \
+       rancher-cluster/rancher-cluster.yml > rke.yml
+}
 
 download_rke(){
     log Download rke
@@ -69,79 +69,79 @@ download_rke(){
 	  fi
 	  ;;
       *)
-          echo "Unsupported platform $uname" 1>&2
+          echo "Unsupported platform $uname" 1>&2 >> log.txt
 	  exit 1
     esac
 }
 
-
-get_cert(){
-    download_lego
-    if [ ! -f .lego/certificates/rancher.${DOMAIN_SUFFIX}.crt ] ; then
-        log Get certificate
-        export DO_AUTH_TOKEN=$DIGITALOCEAN_TOKEN
-        ./lego --domains rancher.${DOMAIN_SUFFIX} --email $CERT_EMAIL --accept-tos --dns digitalocean run
-    fi
+test_kubernetes(){
+    log test kubernetes
+    kubectl --kubeconfig=kube_config_rke.yml get nodes
+    kubectl --kubeconfig=kube_config_rke.yml get pods --all-namespaces
+    log test finished
 }
 
-
-gen_rke_config() {
-    log Generate rke.yml
-
-    cat .lego/certificates/rancher.${DOMAIN_SUFFIX}.crt .lego/certificates/rancher.${DOMAIN_SUFFIX}.issuer.crt > .lego/certificates/rancher.${DOMAIN_SUFFIX}.bundle
-    base64_crt=$(base64 -w 0 .lego/certificates/rancher.${DOMAIN_SUFFIX}.bundle)
-    base64_key=$(base64 -w 0 .lego/certificates/rancher.${DOMAIN_SUFFIX}.key)
-
-    curl -sLo 3-node-certificate-recognizedca.yml \
-      https://raw.githubusercontent.com/rancher/rancher/master/rke-templates/3-node-certificate-recognizedca.yml
-
-    addr0=$(terraform output -json | jq -r .node0_address.value)
-    addr1=$(terraform output -json | jq -r .node1_address.value)
-    addr2=$(terraform output -json | jq -r .node2_address.value)
-
-    sed -e "1,/<IP>/s/<IP>/$addr0/" \
-        -e "1,/<IP>/s/<IP>/$addr1/" \
-        -e "1,/<IP>/s/<IP>/$addr2/" \
-        -e "s/<USER>/root/" \
-        -e "s/<PEM_FILE>/id_rsa/" \
-        -e "s/<FQDN>/rancher.$DOMAIN_SUFFIX/" \
-        -e "s/<BASE64_CRT>/$base64_crt/" \
-        -e "s/<BASE64_KEY>/$base64_key/" \
-       3-node-certificate-recognizedca.yml > rke.yml
+create_tiller(){
+    log Creating tiller
+    kubectl --kubeconfig=kube_config_rke.yml -n kube-system create serviceaccount tiller
+    log Creating tiller succeeded
 }
 
-wait_server_boot(){
-    addr=$(terraform output -json | jq -r .node2_address.value)
-    echo -n "Waiting for docker installed."
-    i=0
-    until timeout 5 ssh -i id_rsa -o StrictHostKeyChecking=no root@$addr docker ps > /dev/null 2>&1; do
-        echo -n "."
-        i=$(($i + 1))
-	if [ $i -ge 60 ] ; then
-	     echo "Given up the connecting to the server" 1>&2
-	     exit 1
-	fi
-    done
-    echo
+create_clusterrolebinding(){
+    log Creating clusterrolebinding
+    kubectl --kubeconfig=kube_config_rke.yml create clusterrolebinding tiller --clusterrole=cluster-admin --serviceaccount=kube-system:tiller
+    log Creating clusterrolebinding succeeded
+}
+
+helm_int(){
+    sleep 10
+    log helm init
+    helm --kubeconfig=kube_config_rke.yml init --service-account tiller
+    log helm succeded
+    log add rancher:stable repo
+    sleep 10
+    helm --kubeconfig=kube_config_rke.yml repo add rancher-stable https://releases.rancher.com/server-charts/stable
+    log add rancher:stable succeded
+}
+
+install_cert_manager(){
+    log installing cert manager
+    sleep 10
+    helm --kubeconfig=kube_config_rke.yml install stable/cert-manager --name cert-manager --namespace kube-system --version v0.5.2
+    log installing cert manager finished
+}
+
+install_rancher(){
+    log installing rancher 2
+    sleep 10
+    helm --kubeconfig=kube_config_rke.yml install rancher-stable/rancher --name rancher --namespace cattle-system --set hostname=rc.${DOMAIN_SUFFIX} --set ingress.tls.source=letsEncrypt --set letsEncrypt.email=$CERT_EMAIL
+    sleep 10
+    kubectl --kubeconfig=kube_config_rke.yml -n cattle-system rollout status deploy/rancher
+    log installing rancher 2 finished
+}
+
+describe_cert(){
+    kubectl --kubeconfig=kube_config_rke.yml -n cattle-system describe certificate
+    sleep 10
 }
 
 cleanup(){
-    rm -f rke* lego* *.yml
+    rm -f rke* lego* *.yml log.txt
     rm -fr .lego
 }
 
 if [ -z "$DIGITALOCEAN_TOKEN" ] ; then
-    echo "set DIGITALOCEAN_TOKEN first." 1>&2
+    echo "set DIGITALOCEAN_TOKEN first." 1>&2 >> log.txt
     exit 1
 fi
 
 if [ -z "$DOMAIN_SUFFIX" ] ; then
-    echo "set DOMAIN_SUFFIX first." 1>&2
+    echo "set DOMAIN_SUFFIX first." 1>&2 >> log.txt
     exit 1
 fi
 
 if [ -z "$CERT_EMAIL" ] ; then
-    echo "set CERT_EMAIL first." 1>&2
+    echo "set CERT_EMAIL first." 1>&2 >> log.txt
     exit 1
 fi
 
@@ -163,14 +163,21 @@ case "$1" in
 	-out tf.plan
       terraform apply tf.plan
       wait_server_boot
-      get_cert
       gen_rke_config
       download_rke
       log rke up
       ./rke up --config rke.yml
-      echo
-      echo "Try open https://rancher.${DOMAIN_SUFFIX}/"
-      echo
+      test_kubernetes
+      create_tiller
+      create_clusterrolebinding
+      helm_int
+      install_cert_manager
+      install_rancher
+      describe_cert
+
+      echo >> log.txt
+      echo "Try open https://rc.${DOMAIN_SUFFIX}/" >> log.txt
+      echo >> log.txt
     ;;
   d*)
       terraform destroy -var domain_suffix=$DOMAIN_SUFFIX
@@ -182,6 +189,6 @@ case "$1" in
       terraform destroy -var domain_suffix=$DOMAIN_SUFFIX
       cleanup
     ;;
-  *) echo "Usage: $0 {up|plan|destroy|cleanup}" 1>&2
+  *) echo "Usage: $0 {up|plan|destroy|cleanup}" 1>&2 >> log.txt
      exit 1
 esac

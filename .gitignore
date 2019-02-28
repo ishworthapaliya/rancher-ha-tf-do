@@ -18,3 +18,5 @@ lego*.zip
 rke
 *.exe
 *.yml
+
+log.txt

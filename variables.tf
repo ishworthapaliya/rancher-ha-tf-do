@@ -9,7 +9,7 @@ variable "public_key_path" {
 variable "domain_suffix" {}
 
 variable "region" {
-  default = "sgp1"
+  default = "ams3"
 }
 
 variable "ssh_keys" {

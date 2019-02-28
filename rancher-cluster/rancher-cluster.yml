@@ -1,0 +1,22 @@
+nodes:
+  - address: <IP> # hostname or IP to access nodes
+    internal_address: <IP_PRIVATE>
+    user: <USER> # root user (usually 'root')
+    role: [controlplane,etcd,worker] # K8s roles for node
+    ssh_key_path: <PEM_FILE> # path to PEM file
+  - address: <IP>
+    internal_address: <IP_PRIVATE>
+    user: <USER>
+    role: [controlplane,etcd,worker]
+    ssh_key_path: <PEM_FILE>
+  - address: <IP>
+    internal_address: <IP_PRIVATE>
+    user: <USER>
+    role: [controlplane,etcd,worker]
+    ssh_key_path: <PEM_FILE>
+
+services:
+  etcd:
+    snapshot: true
+    creation: 6h
+    retention: 24h
